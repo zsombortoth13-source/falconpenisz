@@ -29,6 +29,12 @@ except Exception:                                                  # the chart c
     LWC = False
 
 _boot.empty()
+# Streamlit imports mh_wf_core, the engine and the other modules ONCE per server process, but runs this page file again on every click. When files were replaced while the app was running the
+# page is new and those modules are old (an AttributeError, or worse, a silent mix of old and new rules). Say so plainly and stop: the fix is to start the app again.
+if getattr(core, "LOADED_FINGERPRINT", None) != getattr(core, "code_fingerprint", lambda: None)():
+    st.error("The app's files changed while it was running, so this page and the code it loaded no longer match. Close the app (its console window in the taskbar) and start it again "
+             "(desktop icon). On Streamlit Community Cloud: Manage app > Reboot app.", icon=":material/restart_alt:")
+    st.stop()
 ss = st.session_state
 ON_CLOUD = os.path.abspath(__file__).replace("\\", "/").startswith("/mount/src")      # Streamlit Community Cloud: a small shared machine
 
@@ -107,6 +113,9 @@ with st.sidebar:
         tv_table = core.tv_prices.manifest()
         if len(tv_table):
             st.caption(f"{len(tv_table)} files, fetched {tv_table['fetched_at'].min()} to {tv_table['fetched_at'].max()}; last bar {tv_table['last'].max()}.")
+        missing_tv = [m for m in markets if m in core.tv_prices.MARKETS and not core.tv_prices.has(m)]
+        if missing_tv:
+            st.warning(f"No TradingView file here for: {', '.join(missing_tv)}. The first run downloads them from TradingView (about 10 seconds each). To skip that, put the data_tradingview folder next to the app.")
         if st.button("Download the latest TradingView data", key="w_tv_update", icon=":material/download:", disabled=core.is_running(),
                      help="Fetches every market's whole daily history from TradingView (about 2 minutes) and replaces the files in data_tradingview/. Delayed futures data, bars only."):
             with st.spinner("Fetching 15 markets from TradingView (about 2 minutes)..."):
@@ -121,6 +130,9 @@ with st.sidebar:
         age = core.cache_age_hours(markets) if markets else float("inf")
         st.caption("Saved on disk: " + ("not yet for every market (the first run downloads them)" if not np.isfinite(age) else f"oldest {age:.1f} h old (refreshed after {core.CACHE_HOURS} h)"))
     refresh = st.checkbox("Download fresh prices on the next run", value=False, key="w_refresh", disabled=price_source == core.SOURCE_TV, help="Yahoo source only.")
+
+with st.sidebar:
+    st.caption("Setup check: " + core.setup_check(markets, costs, price_source))      # which code, which cost profile, how many price files: compare it with the app on your own computer
 
 # ------------------------------------------------------------------------------------------------------------------------------------ the strategy (shared by the backtest and the walk-forward)
 for key, _, _, default, default_text, _ in core.PARAMS:
@@ -457,7 +469,7 @@ def backtest_mode():
         return
     s = res["settings"]
     st.caption(f"{len(s['markets'])} markets from {s['start']} · {s['costs']}" + (f" · {s.get('contract_size', 'micro')} contracts" if s["costs"] == core.COST_IBKR else "")
-               + f" · ${s['capital']:,.0f} account · {core.format_for_tradingview(s['values'])}")
+               + f" · ${s['capital']:,.0f} account · {core.data_caption(res.get('data_info'))} · {core.format_for_tradingview(s['values'])}")
     for note in res["notes"][:3]:
         st.caption(note)
     stat_tiles(res["stats"], res["bh_stats"])
@@ -565,7 +577,7 @@ def walkforward_mode():
     elapsed = (core.RUN["t1"] or 0) - (core.RUN["t0"] or 0)
     st.markdown("#### Result")
     st.caption(f"{len(s['markets'])} markets · {s['train_years']}y train / {s['test_years']}y test · {s['trials']} trials per window ({s['search_method']}, ranked by {s['rank_metric']}) · "
-               f"{s['costs']} · ${s['capital']:,.0f} account · finished in {elapsed:.0f} s")
+               f"{s['costs']} · ${s['capital']:,.0f} account · {core.data_caption(res.get('data_info'))} · finished in {elapsed:.0f} s")
     stats, bh_stats, curve, bh, summary = res["stats"], res["bh_stats"], res["curve"], res["bh"], res["summary"]
     if stats is None:
         st.warning("No window produced an out-of-sample result (see the log).")
@@ -670,7 +682,7 @@ def optimizer_mode():
     elapsed = (core.RUN["t1"] or 0) - (core.RUN["t0"] or 0)
     st.markdown("#### Result")
     st.caption(f"{len(s['markets'])} markets from {s['start']} · {s['trials']} trials ranked by {s['rank_metric']} · {res['n_valid']} gave a result, {res['n_failed']} did not (no trades) · "
-               f"{s['costs']} · ${s['capital']:,.0f} account · finished in {elapsed:.0f} s. In-sample.")
+               f"{s['costs']} · ${s['capital']:,.0f} account · {core.data_caption(res.get('data_info'))} · finished in {elapsed:.0f} s. In-sample.")
     if not res["ranked"]:
         st.warning("No trial produced a result (see the log).")
         with st.expander("Log"):

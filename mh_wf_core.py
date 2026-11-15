@@ -128,21 +128,68 @@ def default_history_start() -> str:
     return BD.HISTORY_START
 
 
+FINGERPRINT_FILES = ("baseline_defaults.py", "brokers.py", "brokers_builtin.py", "ibkr_fees.py", "mh_walkforward_ui.py", "mh_wf_charts.py", "mh_wf_core.py", "monte_carlo.py",
+                     "optimize_turtle_dual_system.py", "turtle_dual_system.py", "tv_prices.py", "walk_forward_turtle.py", "wf_fast.py")
+
+
+def code_fingerprint() -> str:
+    """A short fingerprint of the app's own code files (line endings ignored; a missing file counts). The same files give the same fingerprint on every machine, so a cloud app and a local one
+    can be compared at a glance: a different fingerprint means a different version, or files that were not uploaded."""
+    h = hashlib.md5()
+    for name in FINGERPRINT_FILES:
+        h.update(name.encode())
+        path = os.path.join(ROOT, name)
+        h.update(open(path, "rb").read().replace(b"\r\n", b"\n") if os.path.exists(path) else b"MISSING")
+    return h.hexdigest()[:8]
+
+
+LOADED_FINGERPRINT = code_fingerprint()        # the code as it was when THIS server process imported it: the page compares it with the files now (see mh_walkforward_ui.py)
+
+
+def setup_check(markets, costs: str, source: str) -> str:
+    """One line for the sidebar: the code fingerprint, where the cost profile comes from, and how many TradingView files are here."""
+    parts = [f"code {code_fingerprint()}"]
+    if costs == COST_IBKR:
+        paths = brokers.list_profiles()
+        name = next((n for n, p in paths.items() if "futures" in n.lower()), None)
+        parts.append("costs: Interactive Brokers, " + (f"{brokers.profile_source(paths[name])} profile" if name else "NO PROFILE"))
+    if source == SOURCE_TV:
+        want = [m for m in markets if m in tv_prices.MARKETS]
+        parts.append(f"TradingView files {sum(1 for m in want if tv_prices.has(m))}/{len(want)}")
+    return " · ".join(parts)
+
+
+def data_summary(prices: dict, source: str) -> dict:
+    """Where a run's prices came from and how far they reach: {'source', 'first', 'last'} (the earliest first bar and the latest last bar of the markets), {} when there are none."""
+    firsts = [df.index[0] for df in prices.values() if len(df)]
+    lasts = [df.index[-1] for df in prices.values() if len(df)]
+    return {"source": source, "first": min(firsts), "last": max(lasts)} if firsts else {}
+
+
+def data_caption(info: dict) -> str:
+    """'prices: TradingView files, 1951-01-02 to 2026-11-13' for a result's caption ('' without information)."""
+    if not info:
+        return ""
+    return f"prices: {'TradingView files' if info['source'] == SOURCE_TV else 'Yahoo Finance'}, {info['first'].date()} to {info['last'].date()}"
+
+
 def load_prices(markets, refresh: bool = False, source: str = SOURCE_YAHOO, history_start: str = None) -> dict:
     """Daily prices of the markets. Yahoo: from the disk cache when saved within CACHE_HOURS hours, else downloaded (the engine's own cleaning) and saved. TradingView: read from the files of
-    tv_prices.py (the engine's own cleaning too), from `history_start` (default the last 30 years); a market without a file falls back to Yahoo."""
+    tv_prices.py (the engine's own cleaning too), from `history_start` (default the baseline's 1951-01-01). A market whose file is missing is downloaded from TradingView first, and if that fails the
+    run stops with a clear error: a market with a TradingView symbol is never quietly taken from Yahoo (whose history is only the last 30 years)."""
     if source == SOURCE_TV:
-        have = [m for m in markets if tv_prices.has(m)]
+        have = [m for m in markets if m in tv_prices.MARKETS]
         data = {}
         if have:
             data = _ORIGINAL_DOWNLOAD({m: ALL_TICKERS[m] for m in have}, history_start or td.START_DATE, td.END_DATE, SOURCE_TV)
         for name, df in data.items():
             df.attrs["asset"] = name
-        rest = [m for m in markets if m not in data]
+        rest = [m for m in markets if m not in tv_prices.MARKETS]          # no TradingView symbol at all: only these may come from Yahoo
         if rest:
-            print(f"No TradingView file for {', '.join(rest)}: Yahoo is used for them.")
+            print(f"No TradingView symbol for {', '.join(rest)}: Yahoo is used for them.")
             data.update(load_prices(rest, refresh))
-        print(f"Prices: {len([m for m in markets if m in data and m in have])} market(s) from the TradingView files")
+        info = data_summary(data, source)
+        print(f"Prices: {len([m for m in markets if m in data and m in have])} market(s) from the TradingView files" + (f", {info['first'].date()} to {info['last'].date()}" if info else ""))
         return data
     os.makedirs(CACHE_DIR, exist_ok=True)
     data, fetched, stale = {}, [], []
@@ -189,7 +236,7 @@ def clear_price_cache():
 
 # ---------------------------------------------------------------------------------------------------------------------------------- the engine set-up for a run
 def broker_profile():
-    """The first futures broker profile of the brokers folder (Interactive Brokers) and its micro-contract sizing, or (None, None)."""
+    """The first futures broker profile (Interactive Brokers: the brokers/ folder, or the copy written into brokers_builtin.py) and its micro-contract sizing, or (None, None)."""
     for name, path in brokers.list_profiles().items():
         try:
             profile = brokers.load(path)
@@ -223,7 +270,8 @@ def configure_account(s: dict, markets) -> list:
         profile, sizing = broker_profile()
         sizing = s.get("contract_size") or sizing
         if profile is None:
-            notes.append("No futures broker profile found in the brokers folder: flat % costs were used instead.")
+            raise RuntimeError("No futures broker profile found (neither the brokers/ folder nor brokers_builtin.py): the Interactive Brokers cost model cannot be built. "
+                               "Upload brokers_builtin.py, or choose another trading-cost setting.")      # never quietly swap in a different cost model
         else:
             compiled = brokers.compile_profile(profile, list(markets), sizing, margin_calls=bool(s.get("margin_calls")), margin_stress=1.0, stop_out_pct=None)
             for name, value in compiled["engine"].items():
@@ -319,6 +367,7 @@ def _run(settings: dict):
             td.download_data = lambda tickers, start, end: {k: v for k, v in prices.items() if k in tickers}     # the walk-forward asks for prices itself: hand it the cached ones
             result = wf.main(cancel_event=RUN["cancel"])
         RUN["result"] = summarize(result, settings, prices, RUN["buf"].getvalue())
+        RUN["result"]["data_info"] = data_summary(prices, settings.get("price_source", SOURCE_YAHOO))
     except Exception:
         RUN["error"] = traceback.format_exc()
     finally:
@@ -351,6 +400,7 @@ def _run_optimize(settings: dict):
             if RUN["cancel"].is_set():
                 print("Stopped: the trials finished so far are kept.")
         RUN["result"] = summarize_optimize(results, n_failed, settings, RUN["buf"].getvalue())
+        RUN["result"]["data_info"] = data_summary(raw, settings.get("price_source", SOURCE_YAHOO))
     except Exception:
         RUN["error"] = traceback.format_exc()
     finally:
@@ -648,7 +698,7 @@ def run_backtest(s: dict) -> dict:
                 td.RECORD_HISTORY = False
         capital = float(s["capital"])
         eq = port["equity_curve"].dropna()
-        out = {"settings": s, "notes": notes, "port": port, "curve": eq, "stats": td.performance_stats(eq, capital),
+        out = {"settings": s, "notes": notes, "data_info": data_summary({m: prices[m] for m in markets}, s.get("price_source", SOURCE_YAHOO)), "port": port, "curve": eq, "stats": td.performance_stats(eq, capital),
                "trades": {m: port["trades_by_asset"].get(m, []) for m in markets}}
         try:
             bh = _equal_weight_buy_and_hold({m: prices[m] for m in markets}, capital, eq.index)

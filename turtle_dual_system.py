@@ -533,10 +533,19 @@ def download_data(tickers: dict, start: str, end, source: str = None) -> dict:
         df = None
         if source == "tradingview":
             import tv_prices
+            if name in tv_prices.MARKETS and not tv_prices.has(name):
+                # the file is not here (the data_tradingview folder was not uploaded, or the market is new): fetch it now. NEVER fall back to Yahoo for a market that has a TradingView symbol:
+                # that would quietly swap the data source and the length of the history (Yahoo: the last 30 years only)
+                print(f"{name}: no TradingView file here, downloading it from TradingView ...")
+                try:
+                    tv_prices.update(name)
+                except Exception as e:
+                    raise RuntimeError(f"No TradingView file for {name} and downloading it failed ({type(e).__name__}: {str(e)[:120]}). Put the data_tradingview folder next to the app "
+                                       f"(it has one CSV per market), or choose Yahoo Finance as the price source.") from e
             if tv_prices.has(name):
                 df = tv_prices.load(name, start, end)
             else:
-                print(f"{name}: no TradingView file, taken from Yahoo")
+                print(f"{name}: no TradingView symbol for this market, taken from Yahoo")
         if df is None:
             import yfinance as yf
             df = yf.download(tk, start=start, end=end, progress=False, auto_adjust=True)
