@@ -21,6 +21,7 @@ import baseline_defaults as BD
 import mh_wf_charts as charts
 import mh_wf_core as core
 import monte_carlo
+import relative_performance as relperf
 
 try:
     from streamlit_lightweight_charts import renderLightweightCharts
@@ -73,6 +74,12 @@ def prices_for(asset: str, source: str = "yahoo", history_start: str = None, fil
     return core.load_prices([asset], source=source, history_start=history_start)[asset]
 
 
+@st.cache_data(show_spinner=False)
+def first_dates_for(markets: tuple, source: str, history_start: str = None, skip_bars: int = 0, files_stamp: str = "") -> dict:
+    """{market: date of its first price bar, or of its bar number skip_bars} from the prices on disk (see core.first_bar_dates)."""
+    return core.first_bar_dates(list(markets), source, history_start, skip_bars)
+
+
 # ------------------------------------------------------------------------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.subheader("Markets")
@@ -106,7 +113,7 @@ with st.sidebar:
     history_start = None
     if price_source == core.SOURCE_TV:
         history_start = str(st.date_input("History starts", value=dt.date.fromisoformat(core.default_history_start()), min_value=dt.date(1896, 1, 1), key="w_history_start",
-                                          help="Prices are used from this date (default: the last 30 years, like Yahoo). The walk-forward uses every year from here, so an earlier start means more windows. Earlier "
+                                          help="Prices are used from this date (default: 1951-01-01, the baseline's start). The walk-forward uses every year from here, so an earlier start means more windows. Earlier "
                                                "data is thinner: the S&P 500 is close-only until 1962 (the monthly points before 1950 are cut out of the files), and old futures bars often have no high-low range (the "
                                                "engine estimates it), so results from before the 1990s are rough."))
         st.caption("Bitcoin is used from " + core.tv_prices.LAB_START["Bitcoin"] + " (before that it cost $5-$900 and per-contract fees swamp a position). The files keep everything.")
@@ -221,11 +228,49 @@ def equity_view(curve, bh, name, key, csv_name):
     st.altair_chart(alt.Chart(under.reset_index()).mark_area(opacity=0.5, color="#d62728").encode(
         x=alt.X("date:T", title=None), y=alt.Y("Drawdown %:Q", title=None), tooltip=["date:T", alt.Tooltip("Drawdown %:Q", format=".1f")]).properties(height=150), width="stretch")
     st.download_button("Download the equity curve (CSV)", frame.to_csv().encode(), csv_name, "text/csv", key=f"{key}_dl")
+    st.divider()
+    relperf.show(curve, bh, f"{key}_rel", csv_name=csv_name.replace(".csv", "_relative.csv"))
 
 
 def tv_files_stamp() -> str:
     """Changes when the TradingView files are refreshed (part of the price cache key)."""
     return ";".join(f"{m}:{int(os.path.getmtime(core.tv_prices.file_for(m)))}" for m in core.tv_prices.MARKETS if core.tv_prices.has(m))
+
+
+def _set_start(key: str, day):
+    ss[key] = day.date()
+
+
+def start_note(start_key=None):
+    """Says which selected market has the LATEST first price, i.e. the day from which every market can be traded, and when the indicators have the history they need (the EMA and the monthly highs
+    look back `mh_sma_period` / `mh_max_age` bars, so a market cannot signal before that many bars of its own). With `start_key` two buttons put either day in that date picker."""
+    if not markets:
+        return
+    stamp = tv_files_stamp() if price_source == core.SOURCE_TV else ""
+    warm = max(int(values["mh_sma_period"]), int(values["mh_max_age"]))
+    firsts = first_dates_for(tuple(markets), price_source, history_start, 0, stamp)
+    ready = first_dates_for(tuple(markets), price_source, history_start, warm, stamp)
+    late, late_ready = core.latest_start(firsts), core.latest_start(ready)
+    if late is None:
+        st.caption("Latest start: not known yet, because the selected markets have no prices on disk. The first run downloads them.")
+        return
+    name, first = late
+    others = [d for m, d in firsts.items() if m != name]
+    unknown = [m for m in markets if m not in firsts]
+    line = (f"**Latest start: {name}** - its prices begin {first.date()}"
+            + (f"; the other {len(others)} market(s) begin between {min(others).date()} and {max(others).date()}. Start the test earlier and {name} simply joins when its prices begin." if others else "."))
+    if unknown:
+        line += f" (No prices on disk yet for {', '.join(unknown)}.)"
+    st.caption(line)
+    ready_name, ready_day = late_ready
+    st.caption(f"The indicators need {warm} bars of a market's own history before it can signal (EMA {int(values['mh_sma_period'])}, monthly highs up to {int(values['mh_max_age'])} days old), so every market can "
+               f"trade from {ready_day.date()} ({ready_name} is the last to have them).")
+    if start_key:
+        c1, c2, _ = st.columns([1.3, 1.6, 3])
+        c1.button(f"Start at {first.date()}", key=f"{start_key}_use_first", on_click=_set_start, args=(start_key, first), icon=":material/event:",
+                  help=f"The first day every selected market has a price ({name} begins).")
+        c2.button(f"Start at {ready_day.date()} (indicators ready)", key=f"{start_key}_use_ready", on_click=_set_start, args=(start_key, ready_day), icon=":material/event_available:",
+                  help="The first day every selected market also has the history its indicators need, so all of them can open a trade.")
 
 
 def heatmap(matrix: pd.DataFrame, key: str):
@@ -451,10 +496,14 @@ def show_live_panel(prefix: str):
 def backtest_mode():
     st.subheader("Backtest")
     b1, b2, b3 = st.columns([1.2, 1.7, 2.6], vertical_alignment="bottom")
-    start = b1.date_input("Test from", value=dt.date(2005, 1, 1), min_value=dt.date(1896, 1, 1), key="bt_start", help="Trading starts on this date; the indicators use all the history before it.")
+    ss.setdefault("bt_start", dt.date.fromisoformat(BD.START_DATE))          # seeded here, not with value=, so the 'Start at ...' buttons can change it without Streamlit's default-value warning
+    start = b1.date_input("Test from", min_value=dt.date(1896, 1, 1), key="bt_start",
+                          help="Trading starts on this date; the indicators use all the history before it. The default is 1951-01-01, the start of the history: every market trades from its own first price, so a market "
+                               "whose prices begin later joins later. The note below says which market that is.")
     go = b2.button("Run backtest", type="primary", icon=":material/play_arrow:", key="bt_run", disabled=running or not markets)
     if running:
         b3.caption("A walk-forward or optimizer run is in progress: the backtest waits for it.")
+    start_note("bt_start")
     if go:
         with st.spinner("Running the backtest..."):
             ss["bt_result"] = core.run_backtest({"markets": list(markets), "capital": float(capital), "costs": costs, "margin_calls": bool(margin_calls), "take_min_one": bool(take_min), "margin_slice": bool(margin_slice), "contract_size": contract_size, "exposure_pct": float(exposure),
@@ -543,6 +592,7 @@ def walkforward_mode():
     workers = y2.number_input("Worker processes (0 = automatic)", 0, 64, 2 if ON_CLOUD else 0, 1, key="w_workers",
                               help="Windows run in parallel, one per process. Automatic uses every core of the machine minus one; on Streamlit Community Cloud (a small shared machine) it starts at 2.")
     seed = y3.number_input("Random seed", 0, 100000, BD.SEED, 1, key="w_seed")
+    start_note()
     b1, b2 = st.columns([1, 3])
     go = b1.button("Run walk-forward", type="primary", icon=":material/play_arrow:", key="w_run", disabled=running or not markets or bool(setting_errors))
     if not markets:
@@ -639,12 +689,15 @@ def optimizer_mode():
     st.caption("Tries many combinations of the settings ticked 'Search it' on ONE stretch of history and ranks them. What it shows is IN-SAMPLE: the search saw all of this history, so these numbers are the best this "
                "strategy could have done there, not what it will do. The walk-forward is the test of whether a pick holds up on data the search never saw.")
     o1, o2, o3, o4 = st.columns(4)
-    start = o1.date_input("Optimize from", value=dt.date(2005, 1, 1), min_value=dt.date(1896, 1, 1), key="opt_start",
-                          help="Every trial trades from this date to the last bar; the indicators use all the history before it (the same as the backtest's 'Test from', so a trial and a backtest with its numbers match).")
+    ss.setdefault("opt_start", dt.date.fromisoformat(BD.START_DATE))
+    start = o1.date_input("Optimize from", min_value=dt.date(1896, 1, 1), key="opt_start",
+                          help="Every trial trades from this date to the last bar; the indicators use all the history before it (the same as the backtest's 'Test from', so a trial and a backtest with its numbers match). "
+                               "The default is 1951-01-01, the start of the history.")
     trials = o2.number_input("Trials", 5, 3000, 100, 10, key="opt_trials", help="How many settings combinations are simulated. 50-100 is a quick look, 300+ is thorough. Each one is a full backtest of the account.")
     rank_metric = o3.selectbox("Rank by", ["sharpe", "sortino", "calmar", "cagr", "total_return"], key="opt_rank",
                                help="The number the search tries to push up and the table is sorted by. Sortino = like Sharpe but only the downside swings count as risk.")
     seed = o4.number_input("Random seed", 0, 100000, 42, 1, key="opt_seed")
+    start_note("opt_start")
     p1, p2 = st.columns([1, 3])
     workers = p1.number_input("Worker processes (0 = automatic)", 0, 64, 2 if ON_CLOUD else 0, 1, key="opt_workers",
                               help="Trials run in parallel, one per process. Automatic uses every core of the machine minus one; on Streamlit Community Cloud (a small shared machine) it starts at 2.")
@@ -709,6 +762,21 @@ def optimizer_mode():
         ss["pending_values"] = chosen
         ss["pending_mode"] = "Backtest"
         st.rerun()
+    # the relative performance of the trial chosen above: the optimizer keeps only each trial's scores, so the trial is re-run once as a backtest (same numbers, same start: the results match the tiles)
+    st.divider()
+    rel_key = (core.format_settings(chosen), str(s["start"]), tuple(s["markets"]), s["costs"], float(s["capital"]), s.get("contract_size"), id(res))
+    rel = ss.get("opt_rel")
+    if not rel or rel["key"] != rel_key:
+        with st.spinner("Re-running the chosen trial as a backtest to draw its relative performance (a few seconds)..."):
+            again = core.run_backtest({**s, "refresh": False, "values": chosen})
+        rel = {"key": rel_key, "curve": again.get("curve"), "bh": again.get("bh"), "error": again.get("error")}
+        ss["opt_rel"] = rel
+    if rel["error"]:
+        st.warning("The chosen trial could not be re-run for the relative performance chart:")
+        st.code(rel["error"][-1500:], language=None)
+    else:
+        st.caption("The chosen trial's own numbers, re-run as a backtest from the same start date (the optimizer itself keeps only each trial's scores). In-sample, like the table above.")
+        relperf.show(rel["curve"], rel["bh"], "opt_rel", csv_name="mh_optimizer_trial_relative.csv")
     with st.expander("Log"):
         st.code(res["log"][-12000:], language=None)
 

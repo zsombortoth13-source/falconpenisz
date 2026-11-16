@@ -129,7 +129,7 @@ def default_history_start() -> str:
 
 
 FINGERPRINT_FILES = ("baseline_defaults.py", "brokers.py", "brokers_builtin.py", "ibkr_fees.py", "mh_walkforward_ui.py", "mh_wf_charts.py", "mh_wf_core.py", "monte_carlo.py",
-                     "optimize_turtle_dual_system.py", "turtle_dual_system.py", "tv_prices.py", "walk_forward_turtle.py", "wf_fast.py")
+                     "optimize_turtle_dual_system.py", "relative_performance.py", "turtle_dual_system.py", "tv_prices.py", "walk_forward_turtle.py", "wf_fast.py")
 
 
 def code_fingerprint() -> str:
@@ -171,6 +171,33 @@ def data_caption(info: dict) -> str:
     if not info:
         return ""
     return f"prices: {'TradingView files' if info['source'] == SOURCE_TV else 'Yahoo Finance'}, {info['first'].date()} to {info['last'].date()}"
+
+
+def first_bar_dates(markets, source: str = SOURCE_YAHOO, history_start: str = None, skip_bars: int = 0) -> dict:
+    """{market: the date of its first price bar} (or of its bar number `skip_bars`, counting from 0: the day it has that many bars of history behind it) for the markets whose prices are already on
+    disk. TradingView: read from the market's file, from `history_start` on and not before tv_prices.LAB_START; Yahoo: the saved copy, however old. A market with no file or no saved copy yet is
+    left out. Cheap: it reads files, it does not run the engine's cleaning."""
+    out = {}
+    for m in markets:
+        try:
+            if source == SOURCE_TV and m in tv_prices.MARKETS:
+                df = tv_prices.load(m, start=history_start) if tv_prices.has(m) else None
+            else:
+                path = _cache_path(m, ALL_TICKERS[m])
+                df = pickle.load(open(path, "rb")) if os.path.exists(path) else None
+            if df is not None and len(df):
+                out[m] = pd.Timestamp(df.index[min(max(int(skip_bars), 0), len(df) - 1)])
+        except Exception:
+            continue
+    return out
+
+
+def latest_start(first_dates: dict):
+    """(market, date) of the market whose prices start LAST, i.e. the first day on which every market in `first_dates` has a price; None when the dict is empty. A tie goes to the market listed first."""
+    if not first_dates:
+        return None
+    market = max(first_dates, key=lambda m: first_dates[m])
+    return market, first_dates[market]
 
 
 def load_prices(markets, refresh: bool = False, source: str = SOURCE_YAHOO, history_start: str = None) -> dict:

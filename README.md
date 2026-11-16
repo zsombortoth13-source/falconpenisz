@@ -1,6 +1,6 @@
 ﻿# Monthly-high lab
 
-Backtest, optimizer and walk-forward of the monthly-high breakout strategy (entry above its EMA on the first close over a monthly high that is min..max days old, pyramiding on every further signal, an ATR stop that moves up with every add, an ATR take-profit per unit), with Monte Carlo and a chart of every position.
+Backtest, optimizer and walk-forward of the monthly-high breakout strategy (entry above its EMA on the first close over a monthly high that is min..max days old, pyramiding on every further signal, an ATR stop that moves up with every add, an ATR take-profit per unit), with Monte Carlo, a relative performance chart against buy & hold (after every backtest, optimizer trial and walk-forward) and a chart of every position.
 
 Run locally:
 

@@ -5,7 +5,9 @@ A walk-forward started without touching any setting runs exactly this test. Its 
 
 Markets            the nine below (the Strategy Lab has fifteen; these are the ones the baseline uses)
 Prices             TradingView daily files (data_tradingview/), from 1951-01-01
-Account            $100,000, Interactive Brokers futures costs, micro contracts (whole contracts, at least one), margin calls and the equal margin slice on
+Test start         1951-01-01 too (the backtest's "Test from" and the optimizer's "Optimize from"): each market trades from its own first price bar, so a market whose file starts later
+                   (Bitcoin 2014) simply joins later. The apps print which market starts last, to start the test only from when every market can be traded.
+Account           $100,000, Interactive Brokers futures costs, micro contracts (whole contracts, at least one), margin calls and the equal margin slice on
 Risk               1% of the account per unit, at most 300% of equity in one market, at most 100% of equity of open risk in the account
 Walk-forward       10-year rolling train window, 5-year test window, 40 Optuna trials per window ranked by CAGR, 3-year warm start, middle-of-top-N off, seed 42
 Strategy           the eight monthly-high numbers below, all searched over the candidate lists below"""
@@ -13,6 +15,7 @@ Strategy           the eight monthly-high numbers below, all searched over the c
 MARKETS = ["SP500", "Gold", "Silver", "Nasdaq", "Bitcoin", "Ger40", "Dow", "Nikkei225", "Russell2000"]
 PRICE_SOURCE = "tradingview"
 HISTORY_START = "1951-01-01"
+START_DATE = "1951-01-01"       # the backtest's "Test from" and the optimizer's "Optimize from" (and the TradingView scripts' "Start trading from"): trading starts here, indicators use the history before it
 
 ACCOUNT = 100_000.0
 CONTRACT_SIZE = "micro"
